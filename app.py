@@ -366,7 +366,7 @@ col1.metric("进入候选排序", len(ranked))
 col2.metric("最高候选排序分", f"{ranked.iloc[0]['综合得分']:.1f} / 100")
 col3.metric("权重总和", sum(weights.values()))
 
-st.subheader("需求匹配候选排序")
+st.subheader("采购需求匹配与候选排序")
 display = ranked[
     [
         "supplier", "category", "regions", "资格初审结论",

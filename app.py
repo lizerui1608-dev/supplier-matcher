@@ -18,10 +18,10 @@ TEXT_COLUMNS = ["supplier", "category", "regions", "products", "certifications"]
 SCORE_COLUMNS = ["quality_score", "on_time_rate", "compliance_score"]
 
 
-st.set_page_config(page_title="供方智选 | 供应商评估", page_icon="📦", layout="wide")
-st.title("供方智选：供应商匹配与评估")
+st.set_page_config(page_title="供方智选 | 需求匹配", page_icon="📦", layout="wide")
+st.title("供方智选：采购需求匹配与候选排序")
 st.caption(
-    "个人项目演示原型：按品类和服务区域筛选资源，结合资格初筛、文本相关度和履约指标排序。"
+    "个人项目演示原型：按品类和服务区域筛选资源，资格字段初筛通过后，再按需求相关度和采购指标生成候选排序。"
     "所有样例数据均为虚构数据，最终结果需由采购人员复核。"
 )
 
@@ -155,7 +155,7 @@ def qualification_review(row):
         reasons.append("黑名单状态待核验")
 
     if reasons:
-        return pd.Series(["暂不进入能力评分", "；".join(reasons)])
+        return pd.Series(["暂不进入候选排序", "；".join(reasons)])
     return pd.Series(["通过", "资格字段通过，仍需人工核验原始材料"])
 
 
@@ -294,10 +294,10 @@ excluded = suppliers[suppliers["资格初审结论"] != "通过"].copy()
 metric1, metric2, metric3 = st.columns(3)
 metric1.metric("供应商记录", len(suppliers))
 metric2.metric("资格字段初审通过", len(eligible))
-metric3.metric("暂不进入能力评分", len(excluded))
+metric3.metric("暂不进入候选排序", len(excluded))
 
 if not excluded.empty:
-    with st.expander("查看未进入能力评分的记录及原因"):
+    with st.expander("查看未进入候选排序的记录及原因"):
         st.dataframe(
             excluded[
                 [
@@ -317,7 +317,7 @@ if not excluded.empty:
         )
 
 if eligible.empty:
-    st.warning("没有同时满足当前资格字段的供应商，暂不进行能力评分。")
+    st.warning("没有同时满足当前资格字段的供应商，暂不进行候选排序。")
     st.stop()
 
 left, middle, right = st.columns([2, 1, 1])
@@ -362,11 +362,11 @@ except Exception as exc:
     st.stop()
 
 col1, col2, col3 = st.columns(3)
-col1.metric("进入能力评分", len(ranked))
-col2.metric("最高综合得分", f"{ranked.iloc[0]['综合得分']:.1f} / 100")
+col1.metric("进入候选排序", len(ranked))
+col2.metric("最高候选排序分", f"{ranked.iloc[0]['综合得分']:.1f} / 100")
 col3.metric("权重总和", sum(weights.values()))
 
-st.subheader("能力评估候选排序")
+st.subheader("需求匹配候选排序")
 display = ranked[
     [
         "supplier", "category", "regions", "资格初审结论",
@@ -397,7 +397,7 @@ st.dataframe(
 best = ranked.iloc[0]
 st.subheader(f"优先候选：{best['supplier']}")
 st.write(
-    f"综合得分 {best['综合得分']:.1f} 分。资格初审只依据表格中的人工录入状态，"
+    f"候选排序分 {best['综合得分']:.1f} 分。它是当前筛选集合内的启发式比较结果，不是供应商能力等级或中标概率。资格初审只依据表格中的人工录入状态，"
     "不代表程序核验了营业执照、信用、黑名单或证书原件。请结合真实材料和业务意见复核。"
 )
 st.write(
@@ -412,22 +412,22 @@ with st.expander("项目方法与使用边界"):
         """
         - **资格初筛：**根据表格中的资格状态、经营范围匹配和黑名单标记执行硬性过滤。
           这些状态由使用者录入；程序不读取或鉴真原始证照，也不查询企业信用数据。
-        - **能力评分：**对通过资格字段筛选的候选，计算需求文本相关度，并结合价格、
-          质量、准时交付率、合规分和交期形成可调权重排序。
+        - **需求匹配与候选排序：**对通过资格字段筛选的候选，计算需求文本相关度，并结合可比价格、
+          表格中的质量、准时交付率、合规分和交期形成可调权重排序；这不是正式能力认证或履约评级。
         - **文本相关度：**使用字符级 2–4 gram TF-IDF 和余弦相似度，比较品类、
           服务区域、产品和资质描述的字面片段；不理解同义词，不代表中标概率。
         - **相对指标：**价格和交期只在当前品类/区域/资格筛选后的候选集合内归一化。
           候选全部同价或同交期时，该项统一记为 100 分。
         - **规则风险提示：**按可配置阈值标记质量、准时交付率或合规分，不是模型预测。
         - **范围：**本项目为本地个人演示原型，样例数据均为虚构。正式采购应按组织制度
-          完成资料审核、能力评估、审批和人工决策。
+          完成资料审核、需求匹配、审批和人工决策。
         """
     )
 
 csv_bytes = ranked.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
-    "下载能力评分结果 CSV",
+    "下载候选排序结果 CSV",
     data=csv_bytes,
-    file_name="supplier_capability_ranking.csv",
+    file_name="supplier_shortlist.csv",
     mime="text/csv",
 )

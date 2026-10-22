@@ -11,16 +11,18 @@ BASE_DIR = Path(__file__).parent
 DEFAULT_DATA = BASE_DIR / "suppliers.csv"
 REQUIRED_COLUMNS = [
     "supplier", "category", "regions", "products", "certifications",
+    "qualification_status", "scope_match", "blacklisted",
     "unit_price", "quality_score", "on_time_rate", "compliance_score", "lead_days",
 ]
 TEXT_COLUMNS = ["supplier", "category", "regions", "products", "certifications"]
 SCORE_COLUMNS = ["quality_score", "on_time_rate", "compliance_score"]
 
+
 st.set_page_config(page_title="供方智选 | 供应商评估", page_icon="📦", layout="wide")
 st.title("供方智选：供应商匹配与评估")
 st.caption(
-    "本地演示原型：结合文本相关度和采购指标生成候选排序。"
-    "示例数据均为虚构数据，结果仅供人工复核。"
+    "个人项目演示原型：按品类和服务区域筛选资源，结合资格初筛、文本相关度和履约指标排序。"
+    "所有样例数据均为虚构数据，最终结果需由采购人员复核。"
 )
 
 
@@ -48,13 +50,26 @@ def read_suppliers(uploaded_file, sheet_name=None):
 
 def get_excel_sheet_names(uploaded_file):
     """Return worksheet names so the user can choose which sheet contains suppliers."""
-    raw = uploaded_file.getvalue()
-    workbook = pd.ExcelFile(io.BytesIO(raw), engine="openpyxl")
+    workbook = pd.ExcelFile(
+        io.BytesIO(uploaded_file.getvalue()),
+        engine="openpyxl",
+    )
     return workbook.sheet_names
 
 
+def normalize_flag(value, positive_values, negative_values, positive_label, negative_label):
+    if pd.isna(value):
+        return "待核验"
+    text = str(value).strip().lower()
+    if text in positive_values:
+        return positive_label
+    if text in negative_values:
+        return negative_label
+    return "待核验"
+
+
 def validate_data(df):
-    """Normalize headers, validate required values, and skip invalid rows visibly."""
+    """Validate schema and values. Unknown qualification flags remain pending, never pass."""
     if df is None or df.empty:
         st.error("数据表为空，请上传包含供应商记录的文件。")
         st.stop()
@@ -62,7 +77,7 @@ def validate_data(df):
     df = df.copy()
     df.columns = [str(col).lstrip("\ufeff").strip() for col in df.columns]
     if len(set(df.columns)) != len(df.columns):
-        st.error("表格存在重复列名，请检查表头。")
+        st.error("表格存在清理列名后重复的字段，请检查表头。")
         st.stop()
 
     missing = [column for column in REQUIRED_COLUMNS if column not in df.columns]
@@ -74,7 +89,33 @@ def validate_data(df):
     for column in TEXT_COLUMNS:
         df[column] = df[column].fillna("").astype(str).str.strip()
 
-    numeric_columns = ["unit_price", "quality_score", "on_time_rate", "compliance_score", "lead_days"]
+    pass_values = {"通过", "合格", "pass", "passed", "yes", "true", "1"}
+    fail_values = {"不通过", "未通过", "fail", "failed", "no", "false", "0"}
+    df["qualification_status"] = df["qualification_status"].apply(
+        lambda value: normalize_flag(value, pass_values, fail_values, "通过", "不通过")
+    )
+    df["scope_match"] = df["scope_match"].apply(
+        lambda value: normalize_flag(
+            value,
+            {"是", "匹配", "yes", "true", "1"},
+            {"否", "不匹配", "no", "false", "0"},
+            "匹配",
+            "不匹配",
+        )
+    )
+    df["blacklisted"] = df["blacklisted"].apply(
+        lambda value: normalize_flag(
+            value,
+            {"是", "yes", "true", "1", "黑名单"},
+            {"否", "no", "false", "0", "正常"},
+            "是",
+            "否",
+        )
+    )
+
+    numeric_columns = [
+        "unit_price", "quality_score", "on_time_rate", "compliance_score", "lead_days"
+    ]
     invalid = pd.Series(False, index=df.index)
     for column in numeric_columns:
         df[column] = pd.to_numeric(df[column], errors="coerce")
@@ -89,8 +130,8 @@ def validate_data(df):
     invalid_count = int(invalid.sum())
     if invalid_count:
         st.warning(
-            f"已跳过 {invalid_count} 条无效记录。请检查必填名称、数字字段、"
-            "非负价格/交期，以及 0–100 范围内的质量、交付和合规分。"
+            f"已跳过 {invalid_count} 条数据格式无效的记录。请检查供应商名称、品类、"
+            "数值字段，以及 0–100 范围内的质量、交付和合规分。"
         )
         df = df.loc[~invalid].copy()
 
@@ -101,8 +142,25 @@ def validate_data(df):
     return df.reset_index(drop=True)
 
 
+def qualification_review(row):
+    """Apply transparent hard gates to manually supplied review statuses."""
+    reasons = []
+    if row["qualification_status"] != "通过":
+        reasons.append(f"资格状态：{row['qualification_status']}")
+    if row["scope_match"] != "匹配":
+        reasons.append(f"经营范围：{row['scope_match']}")
+    if row["blacklisted"] == "是":
+        reasons.append("表格标记为黑名单")
+    elif row["blacklisted"] == "待核验":
+        reasons.append("黑名单状态待核验")
+
+    if reasons:
+        return pd.Series(["暂不进入能力评分", "；".join(reasons)])
+    return pd.Series(["通过", "资格字段通过，仍需人工核验原始材料"])
+
+
 def minmax_score(values, lower_is_better):
-    """Scale a candidate set to 0–100; ties receive the same neutral-equivalent score."""
+    """Normalize one metric within the current candidate set to a 0–100 scale."""
     low = float(values.min())
     high = float(values.max())
     if high == low:
@@ -113,7 +171,7 @@ def minmax_score(values, lower_is_better):
 
 
 def rank_suppliers(df, query, weights, thresholds):
-    """Calculate text relevance, weighted score, and transparent rule-based risk flags."""
+    """Score eligible candidates using text relevance and weighted purchasing indicators."""
     corpus = (
         df["category"].fillna("") + " " +
         df["regions"].fillna("") + " " +
@@ -131,7 +189,6 @@ def rank_suppliers(df, query, weights, thresholds):
             matrix = vectorizer.fit_transform(corpus + [query.strip()])
             relevance = cosine_similarity(matrix[-1], matrix[:-1]).ravel()
         except ValueError as exc:
-            # Very short text may contain no 2–4 character features to compare.
             if "empty vocabulary" not in str(exc).lower():
                 raise
             relevance = [0.0] * len(df)
@@ -150,7 +207,7 @@ def rank_suppliers(df, query, weights, thresholds):
         "需求相关度": weights["需求匹配"],
         "价格得分": weights["价格"],
         "质量得分": weights["质量"],
-        "交付得分": weights["交付"],
+        "交付得分": weights["准时交付率"],
         "合规得分": weights["合规"],
         "交期得分": weights["交期"],
     }
@@ -172,7 +229,7 @@ def rank_suppliers(df, query, weights, thresholds):
             flags.append(f"质量分低于 {thresholds['质量']}")
         return "；".join(flags) if flags else "未触发当前风险阈值"
 
-    out["风险提示"] = out.apply(risk_flags, axis=1)
+    out["规则风险提示"] = out.apply(risk_flags, axis=1)
     return out.sort_values(
         ["综合得分", "需求相关度", "supplier"],
         ascending=[False, False, True],
@@ -206,7 +263,7 @@ with st.sidebar:
         "需求匹配": st.slider("需求匹配", 0, 100, 30),
         "价格": st.slider("价格", 0, 100, 20),
         "质量": st.slider("质量", 0, 100, 20),
-        "交付": st.slider("准时交付率", 0, 100, 15),
+        "准时交付率": st.slider("准时交付率", 0, 100, 15),
         "合规": st.slider("合规", 0, 100, 10),
         "交期": st.slider("交期", 0, 100, 5),
     }
@@ -228,6 +285,41 @@ except Exception as exc:
     st.error(f"无法读取供应商数据：{exc}")
     st.stop()
 
+review = suppliers.apply(qualification_review, axis=1)
+suppliers["资格初审结论"] = review[0]
+suppliers["资格初审说明"] = review[1]
+eligible = suppliers[suppliers["资格初审结论"] == "通过"].copy()
+excluded = suppliers[suppliers["资格初审结论"] != "通过"].copy()
+
+metric1, metric2, metric3 = st.columns(3)
+metric1.metric("供应商记录", len(suppliers))
+metric2.metric("资格字段初审通过", len(eligible))
+metric3.metric("暂不进入能力评分", len(excluded))
+
+if not excluded.empty:
+    with st.expander("查看未进入能力评分的记录及原因"):
+        st.dataframe(
+            excluded[
+                [
+                    "supplier", "category", "regions", "qualification_status",
+                    "scope_match", "blacklisted", "资格初审说明",
+                ]
+            ].rename(columns={
+                "supplier": "供应商",
+                "category": "品类",
+                "regions": "服务区域",
+                "qualification_status": "资格状态",
+                "scope_match": "经营范围匹配",
+                "blacklisted": "黑名单标记",
+            }),
+            use_container_width=True,
+            hide_index=True,
+        )
+
+if eligible.empty:
+    st.warning("没有同时满足当前资格字段的供应商，暂不进行能力评分。")
+    st.stop()
+
 left, middle, right = st.columns([2, 1, 1])
 with left:
     query = st.text_input(
@@ -235,18 +327,18 @@ with left:
         placeholder="例如：深圳办公家具，需环保认证、按时交付",
     )
 with middle:
-    categories = ["全部品类"] + sorted(suppliers["category"].unique().tolist())
+    categories = ["全部品类"] + sorted(eligible["category"].unique().tolist())
     selected_category = st.selectbox("品类筛选", categories)
 with right:
     all_regions = sorted({
         region.strip()
-        for value in suppliers["regions"]
+        for value in eligible["regions"]
         for region in value.replace("；", ";").split(";")
         if region.strip()
     })
     selected_region = st.selectbox("服务区域", ["全部区域"] + all_regions)
 
-candidates = suppliers.copy()
+candidates = eligible.copy()
 if selected_category != "全部品类":
     candidates = candidates[candidates["category"] == selected_category].copy()
 if selected_region != "全部区域":
@@ -265,24 +357,21 @@ if candidates.empty:
 
 try:
     ranked = rank_suppliers(candidates, query, weights, thresholds)
-except ValueError as exc:
-    st.error(str(exc))
-    st.stop()
 except Exception as exc:
     st.error(f"无法计算匹配结果：{exc}")
     st.stop()
 
 col1, col2, col3 = st.columns(3)
-col1.metric("候选供应商", len(ranked))
+col1.metric("进入能力评分", len(ranked))
 col2.metric("最高综合得分", f"{ranked.iloc[0]['综合得分']:.1f} / 100")
 col3.metric("权重总和", sum(weights.values()))
 
-st.subheader("供应商排序")
+st.subheader("能力评估候选排序")
 display = ranked[
     [
-        "supplier", "category", "regions", "综合得分", "需求相关度",
-        "unit_price", "quality_score", "on_time_rate", "compliance_score",
-        "lead_days", "风险提示",
+        "supplier", "category", "regions", "资格初审结论",
+        "综合得分", "需求相关度", "unit_price", "quality_score",
+        "on_time_rate", "compliance_score", "lead_days", "规则风险提示",
     ]
 ].rename(columns={
     "supplier": "供应商",
@@ -308,34 +397,37 @@ st.dataframe(
 best = ranked.iloc[0]
 st.subheader(f"优先候选：{best['supplier']}")
 st.write(
-    f"综合得分 {best['综合得分']:.1f} 分。该排序仅基于当前筛选结果、需求文本和权重，"
-    "建议结合实际报价、资质原件、服务范围和履约记录人工复核。"
+    f"综合得分 {best['综合得分']:.1f} 分。资格初审只依据表格中的人工录入状态，"
+    "不代表程序核验了营业执照、信用、黑名单或证书原件。请结合真实材料和业务意见复核。"
 )
 st.write(
     f"**主要指标：**参考单价 {best['unit_price']:.2f}；质量分 "
     f"{best['quality_score']:.0f}；准时交付率 {best['on_time_rate']:.0f}%；"
     f"合规分 {best['compliance_score']:.0f}；交期 {best['lead_days']:.0f} 天。"
 )
-st.write(f"**规则风险提示：**{best['风险提示']}。")
+st.write(f"**规则风险提示：**{best['规则风险提示']}。")
 
-with st.expander("评分方法、适用范围与限制"):
+with st.expander("项目方法与使用边界"):
     st.markdown(
         """
-        - **需求相关度：**对品类、服务区域、产品描述和资质描述使用字符级
-          n-gram TF-IDF 与余弦相似度。它比较字面片段，不理解同义词，也不是中标概率。
-        - **价格与交期：**在当前筛选候选集合内分别做 0–100 相对归一化。
-          候选集合全部同价或同交期时，该项统一记为 100 分。
-        - **质量、交付、合规：**直接使用表格中的 0–100 分或准时交付百分数。
-        - **综合分：**各项分数按左侧权重做加权平均；权重总和必须大于 0。
-        - **风险提示：**使用左侧可调整阈值，是规则提示，不是模型预测或证照核验。
-        - **用途边界：**本项目是本地演示原型，样例数据为虚构数据；正式采购仍需人工核验并按制度审批。
+        - **资格初筛：**根据表格中的资格状态、经营范围匹配和黑名单标记执行硬性过滤。
+          这些状态由使用者录入；程序不读取或鉴真原始证照，也不查询企业信用数据。
+        - **能力评分：**对通过资格字段筛选的候选，计算需求文本相关度，并结合价格、
+          质量、准时交付率、合规分和交期形成可调权重排序。
+        - **文本相关度：**使用字符级 2–4 gram TF-IDF 和余弦相似度，比较品类、
+          服务区域、产品和资质描述的字面片段；不理解同义词，不代表中标概率。
+        - **相对指标：**价格和交期只在当前品类/区域/资格筛选后的候选集合内归一化。
+          候选全部同价或同交期时，该项统一记为 100 分。
+        - **规则风险提示：**按可配置阈值标记质量、准时交付率或合规分，不是模型预测。
+        - **范围：**本项目为本地个人演示原型，样例数据均为虚构。正式采购应按组织制度
+          完成资料审核、能力评估、审批和人工决策。
         """
     )
 
 csv_bytes = ranked.to_csv(index=False).encode("utf-8-sig")
 st.download_button(
-    "下载排序结果 CSV",
+    "下载能力评分结果 CSV",
     data=csv_bytes,
-    file_name="supplier_ranking.csv",
+    file_name="supplier_capability_ranking.csv",
     mime="text/csv",
 )

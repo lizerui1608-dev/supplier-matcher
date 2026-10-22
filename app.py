@@ -127,8 +127,14 @@ def rank_suppliers(df, query, weights, thresholds):
             ngram_range=(2, 4),
             min_df=1,
         )
-        matrix = vectorizer.fit_transform(corpus + [query.strip()])
-        relevance = cosine_similarity(matrix[-1], matrix[:-1]).ravel()
+        try:
+            matrix = vectorizer.fit_transform(corpus + [query.strip()])
+            relevance = cosine_similarity(matrix[-1], matrix[:-1]).ravel()
+        except ValueError as exc:
+            # Very short text may contain no 2–4 character features to compare.
+            if "empty vocabulary" not in str(exc).lower():
+                raise
+            relevance = [0.0] * len(df)
     else:
         relevance = [0.0] * len(df)
 

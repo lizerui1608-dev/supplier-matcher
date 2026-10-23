@@ -196,7 +196,10 @@ def rank_suppliers(df, query, weights, thresholds):
         relevance = [0.0] * len(df)
 
     out = df.copy()
-    out["需求相关度"] = relevance * 100
+    # `relevance` is a NumPy array for a non-empty query and a Python list
+    # when the query is blank. List multiplication repeats elements instead
+    # of scaling them, so normalize to a Series before assigning to the frame.
+    out["需求相关度"] = pd.Series(relevance, index=out.index, dtype="float64") * 100
     out["价格得分"] = minmax_score(out["unit_price"], lower_is_better=True)
     out["质量得分"] = out["quality_score"]
     out["交付得分"] = out["on_time_rate"]
@@ -312,7 +315,7 @@ if not excluded.empty:
                 "scope_match": "经营范围匹配",
                 "blacklisted": "黑名单标记",
             }),
-            use_container_width=True,
+            width="stretch",
             hide_index=True,
         )
 
@@ -390,7 +393,7 @@ st.dataframe(
         "参考单价": "{:.2f}",
         "准时交付率": "{:.1f}%",
     }),
-    use_container_width=True,
+    width="stretch",
     hide_index=True,
 )
 
@@ -401,11 +404,11 @@ st.write(
     "不代表程序核验了营业执照、信用、黑名单或证书原件。请结合真实材料和业务意见复核。"
 )
 st.write(
-    f"**主要指标：**参考单价 {best['unit_price']:.2f}；质量分 "
+    f"主要指标：参考单价 {best['unit_price']:.2f}；质量分 "
     f"{best['quality_score']:.0f}；准时交付率 {best['on_time_rate']:.0f}%；"
     f"合规分 {best['compliance_score']:.0f}；交期 {best['lead_days']:.0f} 天。"
 )
-st.write(f"**规则风险提示：**{best['规则风险提示']}。")
+st.write(f"规则风险提示：{best['规则风险提示']}。")
 
 with st.expander("项目方法与使用边界"):
     st.markdown(
@@ -418,7 +421,7 @@ with st.expander("项目方法与使用边界"):
           服务区域、产品和资质描述的字面片段；不理解同义词，不代表中标概率。
         - **相对指标：**价格和交期只在当前品类/区域/资格筛选后的候选集合内归一化。
           候选全部同价或同交期时，该项统一记为 100 分。
-        - **规则风险提示：**按可配置阈值标记质量、准时交付率或合规分，不是模型预测。
+        - 规则风险提示：按可配置阈值标记质量、准时交付率或合规分，不是模型预测。
         - **范围：**本项目为本地个人演示原型，样例数据均为虚构。正式采购应按组织制度
           完成资料审核、需求匹配、审批和人工决策。
         """
